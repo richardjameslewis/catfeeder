@@ -1,3 +1,4 @@
+import faulthandler
 import sys
 import threading
 import time
@@ -8,117 +9,134 @@ from feedercollection import FeederCollection
 
 # Constants
 PWM_FREQUENCY = 50
-# BOARD numbers for outputs
+# BCM numbers for outputs (BOARD numbers in comment)
 # Nala left
 LEFT_RESET_PIN = 12   # 32
-LEFT_DATA_PIN = 16    # 36
 LEFT_PWM_PIN = 19     # 35
-LEFT_ADC_CHAN = 0
+LEFT_ADC_CHAN = 0     # 1
 
 # Rosie right
 RIGHT_RESET_PIN = 24  # 18
-RIGHT_DATA_PIN = 25   # 22
 RIGHT_PWM_PIN = 18    # 12
-RIGHT_ADC_CHAN = 1
+RIGHT_ADC_CHAN = 1    # 2
 
-feeders = FeederCollection()
-#feeders.append(Feeder("Nala", LEFT_PWM_PIN, LEFT_RESET_PIN, LEFT_DATA_PIN, LEFT_ADC_CHAN))
-#feeders.append(Feeder("Rosie", RIGHT_PWM_PIN, RIGHT_RESET_PIN, RIGHT_DATA_PIN, RIGHT_ADC_CHAN))
+# Our servos behave slightly differently, normalize this here
+LEFT_CLOCK_PWM = 5
+LEFT_ANTI_PWM = 9
+RIGHT_CLOCK_PWM = 5
+RIGHT_ANTI_PWM = 10
 
-nala = None
-rosie = None
+faulthandler.enable()
+feeder = None
+# 0,1,2
+verbose = 0
 
 def main(argv):
+  global feeder, verbose
   print("Cat Feeder 0.3")
-  argc = len(argv)
+  
+  # pop program name
+  argv.pop(0)
+  op = None
+  weight = 0
+  resetcalibration = False
 
-  if argc == 2 and argv[1] == "--help":
-    help()
-  elif argc == 2 and argv[1] == "--init":
-    init()
-  elif argc == 2 and argv[1] == "--info":
-    init()
-    nala.info()
-  elif argc == 2 and argv[1] == "--reset":
-    init()
-    reset()
-  elif argc == 2 and argv[1] == "--cal":
-    init()
-    cal2()
-  elif argc == 3 and argv[1] == "--feed":
-    init()
-    feed(float(argv[2]))
-  #elif argv[1] == "--left":
-  #  init()
-  #  feed(False)
-  #elif argv[1] == "--right":
-  #  init()
-  #  feed(True)
+  while len(argv) > 0:
+    argc = len(argv)
+    if argc >= 1 and argv[0] == "--help":
+      help()
+      return
+    elif argc >= 1 and argv[0] == "-v":
+      verbose += 1
+    elif argc >= 2 and argv[0] == "--left":
+      feeder = Feeder(argv[1], LEFT_PWM_PIN, LEFT_RESET_PIN, LEFT_ADC_CHAN, 
+                      LEFT_CLOCK_PWM, LEFT_ANTI_PWM, verbose)
+      argv.pop(0)
+    elif argc >= 2 and argv[0] == "--right":
+      feeder = Feeder(argv[1], RIGHT_PWM_PIN, RIGHT_RESET_PIN, RIGHT_ADC_CHAN, 
+                      RIGHT_CLOCK_PWM, RIGHT_ANTI_PWM, verbose)
+      argv.pop(0)
+    elif argc >= 1 and argv[0] == "--info":
+      op = argv[0]
+    elif argc >= 1 and argv[0] == "--reset":
+      op = argv[0]
+    elif argc >= 1 and argv[0] == "--resetcal":
+      resetcalibration = True
+    elif argc >= 1 and argv[0] == "--cal":
+      op = argv[0]
+    elif argc >= 2 and argv[0] == "--feed":
+      weight = float(argv[1])
+      op = argv[0]
+      argv.pop(0)
+    else:
+      help()
+      return
+    argv.pop(0)
+
+  if feeder == None:
+      help()
+      return
+  init()
+  if op == "--info":
+    feeder.info()
+  elif op == "--reset":
+    feeder.resetSettings()
+    feeder.save()
+  elif op == "--cal":
+    cal2(feeder, resetcalibration)
+  elif op == "--feed":
+    feed(weight)
   else:
     help()
+  # Wait for threads to really end
+  feeder = None
+  time.sleep(5)
 
-  # Don't call GPIO.cleanup, leave pins setup
-  #GPIO.cleanup()
+  GPIO.cleanup()
   return
 
 def help():
-  print("--init - Initialize the GPIO pins for the cat feeder")
-  print("--reset - Reset feeder histrory. Sets excess and average to 0.")
-  print("--cal - Calibrate the cat feeder, needs 250g of food loaded into feeder.")
-  print("--feed N - Feed N grams of food")
-  #print("--left - Feed the cats. Start turning left.")
-  #print("--right - Feed the cats. Start turning right.")
-  print("--help - Print this message")
+  print("--help          Print this message.")
+  print("--left <name>   Use the left hand feeder for cat <name>.")
+  print("--right <name>  Use the right hand feeder for cat <name>.")
+  print("--reset         Reset feeder history. Sets excess and average to 0.")
+  print("--info          Print feeder info.")
+  print("--cal           Calibrate the cat feeder, needs >200g of food loaded into feeder.")
+  print("--resetcal      Reset the calibration before starting measurement.")
+  print("--feed <N>      Feed <N> grams of food.")
+  print("-v              More detail.")
+  print("-v -v           Even More detail.")
 
 def init():
-  global nala, rosie, startstate
-
   #GPIO.setmode(GPIO.BOARD)
   GPIO.setmode(GPIO.BCM)
-  GPIO.setwarnings(False)
-  startstate = None
-  # nala = Feeder("nala", 25, 6.2, LEFT_PWM_PIN, LEFT_RESET_PIN, LEFT_DATA_PIN, LEFT_ADC_CHAN)
-  nala = Feeder("nala", LEFT_PWM_PIN, LEFT_RESET_PIN, LEFT_DATA_PIN, LEFT_ADC_CHAN)
-  #rosie = Feeder(RIGHT_PWM_PIN)
+  GPIO.setwarnings(True)
 
 def feed(weight):
-  nala.startFeed(weight)
-  #rosie.startFeed(100)
-  nala.join()
-  #rosie.join()
-  if nala.empty:
-    print("Warning: Nala's feeder is empty")
-  nala.info()
-
-def cal():
-  sums = 0
-  # remove any excess
-  nala.resetSettings()
-  # feed in big chunks (possibly a mistake)
-  nala.resetCalibration()
-  while not nala.empty:
-    nala.startFeed(25.0)
-    nala.join()
-    sums += nala.sums
-    #time.sleep(5)
-  nala.calibrate(250.0, sums)
-  nala.resetSettings()
-  nala.save()
-
+  feeder.initFeed(weight)
+  feeder.startFeed()
+  feeder.join()
+  if feeder.empty:
+    print("Warning: {0}'s feeder is empty".format(feeder.name))
+  feeder.info()
 
 sums = 0
 calibrating = True
 
-def cal2():
+def cal2(f, resetcalibration):
   global sums, calibrating
   sums = 0
   calibrating = True
+  f.resetSettings()
+  if resetcalibration:
+    f.resetCalibration()
+  f.calms = 0
   cal = threading.Thread(target=calThread)
   cal.daemon = True
   cal.start()
-  input("Press return when around 250g has been dispensed")
+  input("Press return when around 200g has been dispensed")
   calibrating = False
-  nala.stop()
+  f.stop()
   cal.join()
   done = False
   while not done:
@@ -128,29 +146,23 @@ def cal2():
       done = True
     except:
       pass
-  nala.calibrate(amount, sums)
-  nala.resetSettings()
-  nala.save()
+  f.calibrate(amount, sums)
+  f.calms = f.ms
+  f.resetSettings()
+  f.save()
 
 def calThread():
   global sums, calibrating
+  f = feeder
+  print("Cal thread for {0}".format(f.name))
   sums = 0
-  nala.resetSettings()
-  # feed in big chunks (possibly a mistake)
-  nala.resetCalibration()
-  while not nala.empty and calibrating:
-    nala.startFeed(25.0)
-    nala.join()
-    sums += nala.sums
-    print("{0} {1}".format(sums, nala.sums))
-    #time.sleep(5)
+  # feed in 25g chunks
+  while not f.empty and calibrating:
+    f.initFeed(25.0)
+    f.startFeed()
+    f.join()
+    sums += f.sums
+    print("{0} {1}".format(sums, f.sums))
 
-def reset():
-  nala.resetSettings()
-  nala.save()
-
-def info():
-  nala.info()
-  
 if __name__ == "__main__":
     main(sys.argv)
